@@ -76,6 +76,8 @@ uint32_t xorwow(XorwowState& s){
     return new_state + s.d;
 }
 
+/*given i need a random sign, this function takes as input a XORWOW generation and keeps 1 bit for the sign
+the other 31 bits are kept to generate signs later*/
 uint32_t random_bit(XorwowState& s, BitPool& pool) {
     if (pool.remaining == 0) {
         pool.bits = xorwow(s);
@@ -100,7 +102,7 @@ void compute_xi(){
     }  
 }
 
-/* computes the w, k and f according otthe paper*/
+/* computes the w, k and f according to the paper baesed on the xi*/
 void compute_wki(){
     compute_xi();
     for(int i = 0;i<256;i++){        
@@ -116,14 +118,17 @@ void compute_wki(){
     }  
 }
 
-
+/* implement ofthe alogrithm using a initiliazed XORWOW struct to generate a 32 bits unsigned number, takes the first 8
+bits for the index of the layer given they are 256 and follow the paper using first fast acceptance, if rejected
+goes to the 
+*/
 double ziggurat(XorwowState& s,BitPool& h){
     for(;;){
         uint32_t j = xorwow(s);
-        double sign = random_bit(s,h) ? 1.0 : -1.0;
         uint8_t i = (j&255);
         double x = j*w[i];
         if (j<k[i]){
+            double sign = random_bit(s,h) ? 1.0 : -1.0;
             return sign*x;
         }
         if (i == 0) {
@@ -136,11 +141,12 @@ double ziggurat(XorwowState& s,BitPool& h){
                 y  = -std::log(u2);
 
             } while (2.0 * y < xt * xt);
-
+            double sign = random_bit(s,h) ? 1.0 : -1.0;
             return sign *(r + xt);
         }
         double u = (static_cast<double>(xorwow(s)) + 0.5) / 4294967296.0;
         if((u*(f[i-1]-f[i]))<(exp(-0.5*x*x)-f[i])){
+            double sign = random_bit(s,h) ? 1.0 : -1.0;
             return sign*x;
         } 
         
