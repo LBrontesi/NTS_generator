@@ -1,12 +1,14 @@
 #include <iostream>
 #include <cstdint>
 #include <cmath>
+#include <vector>
 
 /* define costants for the ziggurat algorithm with 256 layers
 r is the last right edge, a quantile
 v is the area of each rectangle which must be the same*/
 #define r 3.6541528853610088
 #define v 0.00492867323399
+#define pi 3.1415926535897932
 
 double x[256];
 double w[256];
@@ -154,6 +156,149 @@ double ziggurat(XorwowState& s,BitPool& h){
     }
 }
 
+double tilted_tempered_stable(XorwowState& s, BitPool& h, double lambda ,double alpha ){
+    double gamma = std::pow(lambda,alpha)*alpha*(1-alpha);
+    double eps = ((2.0 + sqrt(pi/2.0)) * sqrt(2.0*gamma) + 1.0) / pi;
+    double phi = (1/pi) * exp(-(gamma*pi*pi)/8) *(2+sqrt(pi/2))*sqrt(gamma*pi);
+    double w1 = eps*sqrt(pi/(2*gamma));
+    double w2 = 2*phi*sqrt(pi);
+    double w3 = eps*pi;
+    double b = (1-alpha)/alpha;
+    double U;
+    double z;
+    double Z;
+    double BU;
+    for(;;){
+        for(;;){
+            double V = (static_cast<double>(xorwow(s)) + 0.5) / 4294967296.0;
+            double W1 = (static_cast<double>(xorwow(s)) + 0.5) / 4294967296.0;
+            if (gamma >=1){
+                if (V < w1/(w1+w2)){
+                    U = abs(ziggurat(s,h))/sqrt(gamma);
+                    if (U >= pi) {
+                        continue;
+                    }
+
+                } else {
+                    U = pi*(1-W1*W1);
+                    if (U >= pi) {
+                        continue;
+                    }
+
+                } 
+
+            } else{
+
+                if (V < w3/(w2+w3)){
+                    U = pi*W1;
+                    if (U >= pi) {
+                        continue;
+                    }
+               
+
+                } else {
+                    U = pi*(1-W1*W1);
+                    if (U >= pi) {
+                        continue;
+                    }
+
+                }
+
+            }
+            double W = (static_cast<double>(xorwow(s)) + 0.5) / 4294967296.0;
+            BU = std::sin(U) /( std::pow(std::sin(alpha * U), alpha) *std::pow(std::sin((1.0 - alpha) * U), 1.0 - alpha));
+
+            double B0 =
+                1.0 /
+                (
+                    std::pow(alpha, alpha) *
+                    std::pow(1.0 - alpha, 1.0 - alpha)
+                );
+
+            double c = std::sqrt(BU / B0);
+            double vi = pow(sqrt(gamma)+alpha*c,(1/alpha));
+            z = vi/(vi-pow(sqrt(gamma),(1/alpha)));
+            double gss = 0.0;
+
+            // xi * exp(-gamma * U^2 / 2) * 1[U >= 0, gamma >= 1]
+            if (gamma >= 1.0 && U >= 0.0) {
+                gss += eps * std::exp(-gamma * U * U / 2.0);
+            }
+
+            // psi / sqrt(pi - U) * 1[0 < U < pi]
+            if (U > 0.0 && U < pi) {
+                gss += phi / std::sqrt(pi - U);
+            }
+
+            // xi * 1[0 <= U <= pi, gamma < 1]
+            if (gamma < 1.0 && U >= 0.0 && U <= pi) {
+                gss += eps;
+            }
+
+            double rho =pi *std::exp(
+                    -std::pow(lambda, alpha) *
+                    (1.0 - 1.0 / (c * c))) *gss/(
+                    (1.0 + std::sqrt(pi / 2.0))
+                    * std::sqrt(gamma) / c+ z);
+            if ((U < pi) && (W*rho<=1)){
+                Z = W*rho;
+                break;
+                
+            }
+        }
+        double a = pow(BU, -1.0/(1.0-alpha));
+        double m = pow((b*lambda)/a,alpha);
+        double h1 = sqrt((m*alpha)/a);
+        double a1 = h1 * sqrt(pi/2);
+        double a2 = h1;
+        double a3 = z/a;
+        double s1 = a1+a2+a3;
+        double V1 = (static_cast<double>(xorwow(s)) + 0.5) / 4294967296.0;
+        double E1 = 0.0;
+        double N1 = 0.0;
+        double X;
+        if (V1 < a1/s1) {
+            N1 = ziggurat(s,h);
+            X = m - h1*abs(N1);
+
+        }else if (V1 < (a1+a2)/s1){
+            X = ((static_cast<double>(xorwow(s)) + 0.5) / 4294967296.0)*(m+h1-m) + m;
+
+        } else {
+            E1 = - log((static_cast<double>(xorwow(s)) + 0.5) / 4294967296.0);
+            X = m + h1 + a3 * E1;
+        }
+        double E = - log(Z);
+        if (X <= 0.0) {
+            continue;
+        }
+
+        double gf = a * (X - m)+ lambda * (std::pow(X, -b) - std::pow(m, -b));
+        if (X<m) gf -= (N1*N1)/2;
+        if (X>m+h1) gf -= E1;
+
+        if((X>=0) && (gf <= E) ){
+            return 1/pow(X,b);
+        }
+    }
+    
+
+
+}
+
+double nts(XorwowState& state,BitPool& pool,double alpha,double lambda,double beta,double mu,double sigma) {
+    
+    double T = tilted_tempered_stable(state, pool, lambda, alpha);
+
+    double meanT = alpha * std::pow(lambda, alpha - 1.0);
+
+    double T_scaled = T / meanT;
+    double Z = ziggurat(state, pool);
+
+    return mu + beta *( T_scaled-1) + sigma * std::sqrt(T_scaled) * Z;
+}
+
+
 int main(int argc, char* argv[]) {
 
     if (argc < 2) {
@@ -171,9 +316,7 @@ int main(int argc, char* argv[]) {
     init_xorwow(g,seed);
     compute_wki();
 
-    for (int i =0;i<N;i++){
-        numbers[i] = ziggurat(g,h);
-    }
 
-    return 0;
+    std::cout <<nts(g,h,0.5,0.5,0,0.0,1.0) << "\n";
+
 }
