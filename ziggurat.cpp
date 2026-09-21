@@ -29,6 +29,46 @@ struct BitPool {
     int remaining = 0;
 };
 
+struct NTSparams {
+    double alpha;
+    double one_minus_alpha;
+    double lambda;
+
+    double inv_alpha;
+    double inv_one_minus_alpha;
+    double neg_inv_one_minus_alpha;
+
+    double lambda_alpha;
+
+    double gamma;
+    double gamma_sqrt;
+    double gamma_power;
+
+    double eps;
+    double phi;
+
+    double w1;
+    double w2;
+    double w3;
+
+    double prob_w1_w2;
+    double prob_w2_w3;
+
+    double b;
+    double b_lambda;
+
+    double inv_B0;
+
+    double meanT;
+    double inv_meanT;
+
+    double sqrt_pi_over_2;
+    double rho_gamma_coeff;
+    double mix12_coeff;
+
+    bool gamma_ge_one;
+};
+
 
 /* Function needed to generate a 64 bits unsigned integer used to initialize Xorwow  struct 
 given xorwow needs 32 bits for a state, then one generation from splitmix64 can be used to initialize 2 states in xorwow
@@ -156,146 +196,280 @@ double ziggurat(XorwowState& s,BitPool& h){
     }
 }
 
-double tilted_tempered_stable(XorwowState& s, BitPool& h, double lambda ,double alpha ){
-    double gamma = std::pow(lambda,alpha)*alpha*(1-alpha);
-    double eps = ((2.0 + sqrt(pi/2.0)) * sqrt(2.0*gamma) + 1.0) / pi;
-    double phi = (1/pi) * exp(-(gamma*pi*pi)/8) *(2+sqrt(pi/2))*sqrt(gamma*pi);
-    double w1 = eps*sqrt(pi/(2*gamma));
-    double w2 = 2*phi*sqrt(pi);
-    double w3 = eps*pi;
-    double b = (1-alpha)/alpha;
+void initNTSparams(
+    NTSparams& p,
+    double lambda,
+    double alpha
+) {
+    p.alpha = alpha;
+    p.one_minus_alpha = 1.0 - alpha;
+    p.lambda = lambda;
+
+    p.inv_alpha = 1.0 / alpha;
+
+    p.inv_one_minus_alpha =
+        1.0 / p.one_minus_alpha;
+
+    p.neg_inv_one_minus_alpha =
+        -p.inv_one_minus_alpha;
+
+    // lambda^alpha
+    p.lambda_alpha =
+        std::pow(lambda, alpha);
+
+    p.gamma =
+        p.lambda_alpha
+        * alpha
+        * p.one_minus_alpha;
+
+    p.gamma_sqrt =
+        std::sqrt(p.gamma);
+
+    // (sqrt(gamma))^(1/alpha)
+    p.gamma_power =
+        std::pow(
+            p.gamma_sqrt,
+            p.inv_alpha
+        );
+
+    p.sqrt_pi_over_2 =
+        std::sqrt(pi / 2.0);
+
+    p.eps =
+        (
+            (2.0 + p.sqrt_pi_over_2)
+            * std::sqrt(2.0 * p.gamma)
+            + 1.0
+        )
+        / pi;
+
+    p.phi =
+        (1.0 / pi)
+        * std::exp(
+            -(p.gamma * pi * pi) / 8.0
+        )
+        * (2.0 + p.sqrt_pi_over_2)
+        * std::sqrt(p.gamma * pi);
+
+    p.w1 =
+        p.eps
+        * std::sqrt(
+            pi / (2.0 * p.gamma)
+        );
+
+    p.w2 =
+        2.0
+        * p.phi
+        * std::sqrt(pi);
+
+    p.w3 =
+        p.eps * pi;
+
+    p.prob_w1_w2 =
+        p.w1 / (p.w1 + p.w2);
+
+    p.prob_w2_w3 =
+        p.w3 / (p.w2 + p.w3);
+
+    p.b =p.one_minus_alpha / alpha;
+    p.b_lambda =p.b * lambda;
+    p.inv_B0 = std::pow(alpha, alpha) *std::pow(p.one_minus_alpha,p.one_minus_alpha);
+    p.meanT =alpha * std::pow(lambda,alpha - 1.0);
+    p.inv_meanT =1.0 / p.meanT;
+    p.rho_gamma_coeff =(1.0 + p.sqrt_pi_over_2)* p.gamma_sqrt;
+    p.mix12_coeff = p.sqrt_pi_over_2 + 1.0;
+    p.gamma_ge_one = p.gamma >= 1.0;
+}
+
+
+inline double uniform01(XorwowState& s) {
+    constexpr double INV_2_32 =1.0 / 4294967296.0;
+    return(static_cast<double>(xorwow(s)) + 0.5)* INV_2_32;
+}
+
+double tilted_tempered_stable( XorwowState& s,BitPool& h,const NTSparams& p) {
     double U;
     double z;
     double Z;
     double BU;
-    for(;;){
-        for(;;){
-            double V = (static_cast<double>(xorwow(s)) + 0.5) / 4294967296.0;
-            double W1 = (static_cast<double>(xorwow(s)) + 0.5) / 4294967296.0;
-            if (gamma >=1){
-                if (V < w1/(w1+w2)){
-                    U = abs(ziggurat(s,h))/sqrt(gamma);
-                    if (U >= pi) {
-                        continue;
-                    }
+    for (;;) {
 
-                } else {
-                    U = pi*(1-W1*W1);
-                    if (U >= pi) {
-                        continue;
-                    }
+        // --------------------------
+        // First rejection stage
+        // --------------------------
 
-                } 
+        for (;;) {
 
-            } else{
+            double V  = uniform01(s);
+            double W1 = uniform01(s);
 
-                if (V < w3/(w2+w3)){
-                    U = pi*W1;
-                    if (U >= pi) {
-                        continue;
-                    }
-               
+            if (p.gamma_ge_one) {
 
-                } else {
-                    U = pi*(1-W1*W1);
-                    if (U >= pi) {
-                        continue;
-                    }
-
+                if (V < p.prob_w1_w2) {
+                    U =
+                        std::abs(ziggurat(s, h))
+                        / p.gamma_sqrt;
+                }
+                else {
+                    U =
+                        pi * (1.0 - W1 * W1);
                 }
 
             }
-            double W = (static_cast<double>(xorwow(s)) + 0.5) / 4294967296.0;
-            BU = std::sin(U) /( std::pow(std::sin(alpha * U), alpha) *std::pow(std::sin((1.0 - alpha) * U), 1.0 - alpha));
+            else {
 
-            double B0 =
-                1.0 /
+                if (V < p.prob_w2_w3) {
+                    U = pi * W1;
+                }
+                else {
+                    U =
+                        pi * (1.0 - W1 * W1);
+                }
+            }
+
+            if (U >= pi)
+                continue;
+
+            double W = uniform01(s);
+
+            BU =
+                std::sin(U)
+                /
                 (
-                    std::pow(alpha, alpha) *
-                    std::pow(1.0 - alpha, 1.0 - alpha)
+                    std::pow(
+                        std::sin(p.alpha * U),
+                        p.alpha
+                    )
+                    *
+                    std::pow(
+                        std::sin(
+                            p.one_minus_alpha * U
+                        ),
+                        p.one_minus_alpha
+                    )
                 );
 
-            double c = std::sqrt(BU / B0);
-            double vi = pow(sqrt(gamma)+alpha*c,(1/alpha));
-            z = vi/(vi-pow(sqrt(gamma),(1/alpha)));
-            double gss = 0.0;
+            // division removed
+            double c =
+                std::sqrt(
+                    BU * p.inv_B0
+                );
 
-            // xi * exp(-gamma * U^2 / 2) * 1[U >= 0, gamma >= 1]
-            if (gamma >= 1.0 && U >= 0.0) {
-                gss += eps * std::exp(-gamma * U * U / 2.0);
+            double vi =
+                std::pow(
+                    p.gamma_sqrt
+                    + p.alpha * c,
+                    p.inv_alpha
+                );
+
+            // pow(gamma_sqrt,1/alpha)
+            // no longer calculated here
+            z =
+                vi /
+                (vi - p.gamma_power);
+
+            double gss;
+
+            if (p.gamma_ge_one) {
+
+                gss =
+                    p.eps
+                    * std::exp(
+                        -p.gamma
+                        * U * U
+                        / 2.0
+                    );
+
+            }
+            else {
+
+                gss = p.eps;
             }
 
-            // psi / sqrt(pi - U) * 1[0 < U < pi]
-            if (U > 0.0 && U < pi) {
-                gss += phi / std::sqrt(pi - U);
+            if (U > 0.0) {
+                gss +=
+                    p.phi
+                    / std::sqrt(pi - U);
             }
 
-            // xi * 1[0 <= U <= pi, gamma < 1]
-            if (gamma < 1.0 && U >= 0.0 && U <= pi) {
-                gss += eps;
-            }
+            double rho =pi*std::exp(-p.lambda_alpha*(1.0- 1.0 / (c * c)) )*gss/(p.rho_gamma_coeff / c + z);
 
-            double rho =pi *std::exp(
-                    -std::pow(lambda, alpha) *
-                    (1.0 - 1.0 / (c * c))) *gss/(
-                    (1.0 + std::sqrt(pi / 2.0))
-                    * std::sqrt(gamma) / c+ z);
-            if ((U < pi) && (W*rho<=1)){
-                Z = W*rho;
+            Z = W * rho;
+
+            if (Z <= 1.0)
                 break;
-                
-            }
         }
-        double a = pow(BU, -1.0/(1.0-alpha));
-        double m = pow((b*lambda)/a,alpha);
-        double h1 = sqrt((m*alpha)/a);
-        double a1 = h1 * sqrt(pi/2);
-        double a2 = h1;
-        double a3 = z/a;
-        double s1 = a1+a2+a3;
-        double V1 = (static_cast<double>(xorwow(s)) + 0.5) / 4294967296.0;
+
+        double a =
+            std::pow(
+                BU,
+                p.neg_inv_one_minus_alpha
+            );
+
+        double m =
+            std::pow(
+                p.b_lambda / a,
+                p.alpha
+            );
+
+        double h1 =
+            std::sqrt(
+                (m * p.alpha) / a
+            );
+
+        double a1 =
+            h1 * p.sqrt_pi_over_2;
+
+        double a3 =
+            z / a;
+
+        // a1 + a2 + a3
+        // a2 = h1
+        double s1 =h1 * p.mix12_coeff+ a3;
+        double V1 = uniform01(s);
         double E1 = 0.0;
         double N1 = 0.0;
         double X;
-        if (V1 < a1/s1) {
-            N1 = ziggurat(s,h);
-            X = m - h1*abs(N1);
 
-        }else if (V1 < (a1+a2)/s1){
-            X = ((static_cast<double>(xorwow(s)) + 0.5) / 4294967296.0)*(m+h1-m) + m;
-
-        } else {
-            E1 = - log((static_cast<double>(xorwow(s)) + 0.5) / 4294967296.0);
-            X = m + h1 + a3 * E1;
+        if (V1 < a1 / s1) {
+            N1 = ziggurat(s, h);
+            X = m- h1 * std::abs(N1);
         }
-        double E = - log(Z);
-        if (X <= 0.0) {
+        else if (V1 <(h1 * p.mix12_coeff) / s1) {
+            X = m + h1 * uniform01(s);
+        }
+        else {
+            E1 =-std::log(uniform01(s));
+            X = m+ h1+ a3 * E1;
+        }
+        if (X <= 0.0)
             continue;
-        }
 
-        double gf = a * (X - m)+ lambda * (std::pow(X, -b) - std::pow(m, -b));
-        if (X<m) gf -= (N1*N1)/2;
-        if (X>m+h1) gf -= E1;
+        double E = -std::log(Z);
+        double X_neg_b =std::pow(X, -p.b);
+        double m_neg_b =std::pow(m, -p.b);
+        double gf = a * (X - m)+p.lambda    * (X_neg_b - m_neg_b);
 
-        if((X>=0) && (gf <= E) ){
-            return 1/pow(X,b);
+        if (X < m)
+            gf -= (N1 * N1) / 2.0;
+
+        if (X > m + h1)
+            gf -= E1;
+
+        if (gf <= E) {
+            return X_neg_b;
         }
     }
-    
-
-
 }
 
-double nts(XorwowState& state,BitPool& pool,double alpha,double lambda,double beta,double mu,double sigma) {
-    
-    double T = tilted_tempered_stable(state, pool, lambda, alpha);
+double nts( XorwowState& state,BitPool& pool,const NTSparams& p,double beta,double mu,double sigma) {
+    double T = tilted_tempered_stable(state,pool,p);
 
-    double meanT = alpha * std::pow(lambda, alpha - 1.0);
+    double T_scaled = T * p.inv_meanT;
 
-    double T_scaled = T / meanT;
-    double Z = ziggurat(state, pool);
+    double Z = ziggurat(state,pool);
 
-    return mu + beta *( T_scaled-1) + sigma * std::sqrt(T_scaled) * Z;
+    return mu+ beta * (T_scaled - 1.0)+ sigma* std::sqrt(T_scaled)* Z;
 }
 
 
@@ -306,17 +480,24 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    const int N = 100000000;
+    const int N = 10000000;
 
     std::vector<double> numbers(N);
 
     uint64_t seed = std::stoull(argv[1]);
     BitPool h;
     XorwowState g;
+    NTSparams p;
+    initNTSparams(p,0.5,0.5);
     init_xorwow(g,seed);
     compute_wki();
 
+    auto start3 = std::chrono::high_resolution_clock::now();
+    for (int i =0;i <N;i++){
+        numbers[i]=nts(g,h,p,0.5,0.0,1.0);
+    }
+    auto end3 = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> elapsed3 = end3 - start3;
 
-    std::cout <<nts(g,h,0.5,0.5,0,0.0,1.0) << "\n";
-
+    std::cout << "Number of RVs generated " << N << " in " << elapsed3.count() << " ms" << "\n";
 }
