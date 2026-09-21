@@ -238,7 +238,7 @@ inline double uniform01(XorwowState& s) {
 }
 
 
-double tilted_tempered_stable(XorwowState& s, BitPool& h, const NTSparams& p) {
+double tilted_tempered_stable_Devroye(XorwowState& s, BitPool& h, const NTSparams& p) {
     double U;
     double z;
     double Z;
@@ -326,7 +326,7 @@ double tilted_tempered_stable(XorwowState& s, BitPool& h, const NTSparams& p) {
 
 
 double nts(XorwowState& state, BitPool& pool, const NTSparams& p, double beta, double mu, double sigma) {
-    double T = tilted_tempered_stable(state, pool, p);
+    double T = tilted_tempered_stable_Devroye(state, pool, p);
     double T_scaled = T * p.inv_meanT;
     double Z = ziggurat(state, pool);
 
