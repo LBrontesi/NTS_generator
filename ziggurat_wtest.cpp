@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <cmath>
 #include <vector>
+#include <algorithm>
+#include <random>
 
 /* define costants for the ziggurat algorithm with 256 layers
 r is the last right edge, a quantile
@@ -29,7 +31,7 @@ struct BitPool {
     int remaining = 0;
 };
 
-struct NTSparams {
+struct Devroye {
     double alpha;
     double one_minus_alpha;
     double lambda;
@@ -58,6 +60,18 @@ struct NTSparams {
     bool gamma_ge_one;
 };
 
+struct Qu {
+    double alpha;
+    double lambda;
+    double lambda_alpha;
+    double x;
+    double y;
+    double R;
+    double C1;
+    double C2;
+    double C3;
+    double C4;
+};
 
 /* Function needed to generate a 64 bits unsigned integer used to initialize Xorwow struct
 given xorwow needs 32 bits for a state, then one generation from splitmix64 can be used to initialize 2 states in xorwow */
@@ -191,7 +205,7 @@ double ziggurat(XorwowState& s, BitPool& h) {
 }
 
 
-void initNTSparams(NTSparams& p, double lambda, double alpha) {
+void initDevroye(Devroye& p, double lambda, double alpha) {
     p.alpha = alpha;
     p.one_minus_alpha = 1.0 - alpha;
     p.lambda = lambda;
@@ -231,14 +245,129 @@ void initNTSparams(NTSparams& p, double lambda, double alpha) {
     p.gamma_ge_one = p.gamma >= 1.0;
 }
 
+void initQu(Qu& p, double lambda, double a) {
+    p.alpha = a;
+    p.lambda = lambda;
+    p.lambda_alpha = pow(lambda, a);
+    p.x = a * p.lambda_alpha;
+    p.y = (1.0 - a) * p.lambda_alpha;
+
+    p.R = erf(sqrt(a * (1.0 - a) * p.lambda_alpha * pi * pi / 2.0));
+    p.C1 = (tgamma(p.x) * exp(p.x - 1.0) / pow(p.x, p.lambda_alpha)) * pow(p.alpha / (1.0 - p.alpha) + p.x, p.lambda_alpha * (1.0 - p.alpha) + 1.0);
+    p.C2 = tgamma(p.y + 1.0) * exp(p.y) / pow(p.y, p.y);
+    p.C3 = (tgamma(p.x + 1.0) * exp(p.x - 1.0) * pow(p.x, -p.x)) / (sqrt(2.0 * pi * a * (1.0 - a) * p.lambda_alpha) * pow(1.0 + 1.0 / p.y, -1.0 - p.y));
+    p.C4 = tgamma(p.y + 1.0) * exp(p.y) / (sqrt(2.0 * pi * a * (1.0 - a) * p.lambda_alpha) * pow(p.y, p.y));
+}
+
 
 inline double uniform01(XorwowState& s) {
     constexpr double INV_2_32 = 1.0 / 4294967296.0;
     return (static_cast<double>(xorwow(s)) + 0.5) * INV_2_32;
 }
 
+double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p){
+    double U;
+    double X;
+    double V;
+    double S;
+    double Z;
+    static std::mt19937 gen(std::random_device{}());
+    
+    if (p.C1 == std::min({p.C1, p.C2, p.C3, p.C4})) {
+        std::gamma_distribution<double> gamma(p.x, 1.0);
+        for (;;) {
+            U = uniform01(s) * pi;
+            X = gamma(gen);
+            V = uniform01(s);
+            S = X / p.lambda;
 
-double tilted_tempered_stable(XorwowState& s, BitPool& h, const NTSparams& p) {
+            double BU = (pow(sin(p.alpha * U), p.alpha) * pow(sin((1.0 - p.alpha) * U), 1.0 - p.alpha)) / sin(U);
+
+            double x1 = (p.alpha * exp(p.lambda_alpha) * tgamma(p.x)) / (1.0 - p.alpha);
+            double x2 = pow(BU, 1.0 / (1.0 - p.alpha));
+            double x3 = pow(p.lambda, p.alpha / (1.0 - p.alpha));
+            double x4 = pow(X, -p.alpha / (1.0 - p.alpha) - p.x);
+            double x5 = exp(-x2 * x3 * pow(X, -p.alpha / (1.0 - p.alpha)));
+
+            if (V <= x1 * x2 * x3 * x4 * x5 / p.C1) break;
+        }
+
+    } 
+
+    if (p.C2 == std::min({p.C1, p.C2, p.C3, p.C4})){
+        std::gamma_distribution<double> gamma(p.y + 1.0, 1.0);
+        for (;;) {
+            U = uniform01(s) * pi;
+            Z = gamma(gen);
+            V = uniform01(s);
+
+            double BU = (pow(sin(p.alpha * U), p.alpha) * pow(sin((1.0 - p.alpha) * U), 1.0 - p.alpha)) / sin(U);
+
+            S = pow(BU, 1.0 / p.alpha) * pow(Z, -(1.0 - p.alpha) / p.alpha);
+
+            double x1 = exp(p.lambda_alpha) * tgamma(p.y + 1.0);
+            double x2 = pow(Z, -p.y);
+            double x3 = exp(-p.lambda * S);
+
+            if (V <= x1 * x2 * x3 / p.C2) break;
+        }
+    } 
+    if (p.C3 == std::min({p.C1, p.C2, p.C3, p.C4})){
+        std::gamma_distribution<double> gamma(p.x, 1.0);
+        double sigma = 1.0 / sqrt(p.alpha * (1.0 - p.alpha) * p.lambda_alpha);
+
+        for (;;) {
+            do {
+                U = ziggurat(s, h) * sigma;
+            } while (U < 0.0 || U > pi);
+
+            X = gamma(gen);
+            V = uniform01(s);
+            S = X / p.lambda;
+
+            double BU = (pow(sin(p.alpha * U), p.alpha) * pow(sin((1.0 - p.alpha) * U), 1.0 - p.alpha)) / sin(U);
+
+            double x1 = p.R * p.alpha * exp(p.lambda_alpha) * tgamma(p.x);
+            double x2 = pow(p.lambda, p.alpha / (1.0 - p.alpha));
+            double x3 = pow(BU, 1.0 / (1.0 - p.alpha));
+            double x4 = p.C3 * (1.0 - p.alpha) * sqrt(2.0 * pi * p.alpha * (1.0 - p.alpha) * p.lambda_alpha);
+            double x5 = pow(X, p.alpha / (1.0 - p.alpha) + p.x);
+            double x6 = exp(-pow(p.lambda * pow(BU, 1.0 / p.alpha) / X, p.alpha / (1.0 - p.alpha)) + p.alpha * (1.0 - p.alpha) * p.lambda_alpha * U * U / 2.0);
+
+            if (V <= (x1 * x2 * x3 * x6) / (x4 * x5)) break;
+        }
+    } 
+    if (p.C4 == std::min({p.C1, p.C2, p.C3, p.C4})){
+        std::gamma_distribution<double> gamma(p.y + 1.0, 1.0);
+        double sigma = 1.0 / sqrt(p.alpha * (1.0 - p.alpha) * p.lambda_alpha);
+
+        for (;;) {
+            do {
+                U = ziggurat(s, h) * sigma;
+            } while (U < 0.0 || U > pi);
+
+            Z = gamma(gen);
+            V = uniform01(s);
+
+            double BU = (pow(sin(p.alpha * U), p.alpha) * pow(sin((1.0 - p.alpha) * U), 1.0 - p.alpha)) / sin(U);
+
+            S = pow(BU, 1.0 / p.alpha) * pow(Z, -(1.0 - p.alpha) / p.alpha);
+
+            double x1 = p.R * exp(p.lambda_alpha) * tgamma(p.y + 1.0);
+            double x2 = p.C4 * sqrt(2.0 * pi * p.alpha * (1.0 - p.alpha) * p.lambda_alpha) * pow(Z, p.y);
+            double x3 = exp(-p.lambda * S + p.alpha * (1.0 - p.alpha) * p.lambda_alpha * U * U / 2.0);
+
+            if (V <= x1 * x3 / x2) break;
+        }
+    }
+    return S;
+
+}
+
+
+
+
+double tilted_tempered_stable_Devroye(XorwowState& s, BitPool& h, const Devroye& p) {
     double U;
     double z;
     double Z;
@@ -325,11 +454,18 @@ double tilted_tempered_stable(XorwowState& s, BitPool& h, const NTSparams& p) {
 }
 
 
-double nts(XorwowState& state, BitPool& pool, const NTSparams& p, double beta, double mu, double sigma) {
-    double T = tilted_tempered_stable(state, pool, p);
+double NTSDevroye(XorwowState& state, BitPool& pool, const Devroye& p, double beta, double mu, double sigma) {
+    double T = tilted_tempered_stable_Devroye(state, pool, p);
     double T_scaled = T * p.inv_meanT;
     double Z = ziggurat(state, pool);
 
+    return mu + beta * (T_scaled - 1.0) + sigma * std::sqrt(T_scaled) * Z;
+}
+
+double NTSQu(XorwowState& state, BitPool& pool, const Qu& p, double beta, double mu, double sigma) {
+    double T = tilted_tempered_stable_Qu(state, pool, p);
+    double T_scaled = T / (p.alpha * pow(p.lambda, p.alpha - 1.0));
+    double Z = ziggurat(state, pool);
     return mu + beta * (T_scaled - 1.0) + sigma * std::sqrt(T_scaled) * Z;
 }
 
@@ -346,106 +482,124 @@ int main(int argc, char* argv[]) {
     uint64_t seed = std::stoull(argv[1]);
     BitPool h;
     XorwowState g;
-    NTSparams p;
+    Devroye p;
+    Qu q;
 
-    initNTSparams(p, 0.5, 0.5);
+    initDevroye(p, 0.5, 0.5);
+    
     init_xorwow(g, seed);
     compute_wki();
-
-    auto start3 = std::chrono::high_resolution_clock::now();
-
-    for (int i = 0; i < N; i++) numbers[i] = nts(g, h, p, 0.5, 0.0, 1.0);
-
-    auto end3 = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double, std::milli> elapsed3 = end3 - start3;
-
-    std::cout << "Number of RVs generated " << N << " in " << elapsed3.count() << " ms\n";
-
-    long double sum = 0.0L;
-
-    for (int i = 0; i < N; i++) {
-        sum += numbers[i];
-    }
-
-    long double mean = sum / N;
-
-    std::cout << "Mean :" << mean << "\n";
-
-    long double sum_sq = 0.0L;
-
-
-    for (int i = 0; i < N; i++) {
-        long double diff = numbers[i]- mean;
-        sum_sq += diff*diff;
-        
-    }
-
-    long double var = sum_sq / N;
-
-    std::cout << "Variance: " << var << "\n";
-
-    long double sum_3 = 0.0L;
-
-
-    for (int i = 0; i < N; i++) {
-        long double diff = numbers[i]- mean;
-        sum_3 += diff*diff*diff;
-        
-    }
-
-    long double skew = (sum_3 / N)/(var*sqrt(var));
-
-    std::cout << "Skewness: " << skew << "\n";
-
-    long double sum_4 = 0.0L;
-
-
-    for (int i = 0; i < N; i++) {
-        long double diff = numbers[i]- mean;
-        sum_4 += diff*diff*diff*diff;
-        
-    }
-
-    long double kur = (sum_4 / N)/(var*var);
-
-    std::cout << "Kurtosis: " << kur << "\n";
-
-    uint32_t count1 = 0;
-    uint32_t count2 = 0;
-    uint32_t count3 = 0;
-    uint32_t count4 = 0;
-
-    for (int i = 0; i < N; i++) {
-        count1 += (std::abs(numbers[i]) > 1.0);
-        count2 += (std::abs(numbers[i]) > 2.0);
-        count3 += (std::abs(numbers[i]) > 3.0);
-        count4 += (std::abs(numbers[i]) > 4.0);
-    }
-
-    double frequency1 = static_cast<double>(count1) / N;
-    double frequency2 = static_cast<double>(count2) / N;
-    double frequency3 = static_cast<double>(count3) / N;
-    double frequency4 = static_cast<double>(count4) / N;
-
-    std::cout << "Frequency above |1|: " << frequency1 << "\n";
-    std::cout << "Frequency above |2|: " << frequency2 << "\n";
-    std::cout << "Frequency above |3|: " << frequency3 << "\n";
-    std::cout << "Frequency above |4|: " << frequency4 << "\n";
-
-    for (int lag : {1, 2, 5, 10, 50, 100}) {
-
-        long double num = 0.0L;
-
-        for (int i = 0; i < N - lag; i++) {
-            num += (numbers[i] - mean)
-                * (numbers[i + lag] - mean);
+    double alpha = 0.1;
+    double lambda = 0.1;
+    for (int i = 0; i <10;i++){
+        if (i==9){
+            alpha = 0.2;
+            lambda = 2.0;
         }
 
-        long double rho = num / sum_sq;
+        std::cout << "Lambda is " << lambda << " and alpha is " << alpha << "\n";
+        initQu(q, lambda, alpha);
+        auto start4 = std::chrono::high_resolution_clock::now();
 
-        std::cout << "Lag-" << lag
-                << " autocorrelation: "
-                << rho << "\n";
+        for (int i = 0; i < N; i++) numbers[i] = NTSQu(g, h, q, 0.5, 0.0, 1.0);
+
+        auto end4 = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> elapsed4 = end4 - start4;
+
+        std::cout << "Qu -> Number of RVs generated " << N << " in " << elapsed4.count() << " ms\n";
+
+        long double sum = 0.0L;
+
+        for (int i = 0; i < N; i++) {
+            sum += numbers[i];
+        }
+
+        long double mean = sum / N;
+
+        std::cout << "Mean :" << mean << "\n";
+
+        long double sum_sq = 0.0L;
+
+
+        for (int i = 0; i < N; i++) {
+            long double diff = numbers[i]- mean;
+            sum_sq += diff*diff;
+            
+        }
+
+        long double var = sum_sq / N;
+
+        std::cout << "Variance: " << var << "\n";
+
+        long double sum_3 = 0.0L;
+
+
+        for (int i = 0; i < N; i++) {
+            long double diff = numbers[i]- mean;
+            sum_3 += diff*diff*diff;
+            
+        }
+
+        long double skew = (sum_3 / N)/(var*sqrt(var));
+
+        std::cout << "Skewness: " << skew << "\n";
+
+        long double sum_4 = 0.0L;
+
+
+        for (int i = 0; i < N; i++) {
+            long double diff = numbers[i]- mean;
+            sum_4 += diff*diff*diff*diff;
+            
+        }
+
+        long double kur = (sum_4 / N)/(var*var);
+
+        std::cout << "Kurtosis: " << kur << "\n";
+
+        uint32_t count1 = 0;
+        uint32_t count2 = 0;
+        uint32_t count3 = 0;
+        uint32_t count4 = 0;
+
+        for (int i = 0; i < N; i++) {
+            count1 += (std::abs(numbers[i]) > 1.0);
+            count2 += (std::abs(numbers[i]) > 2.0);
+            count3 += (std::abs(numbers[i]) > 3.0);
+            count4 += (std::abs(numbers[i]) > 4.0);
+        }
+
+        double frequency1 = static_cast<double>(count1) / N;
+        double frequency2 = static_cast<double>(count2) / N;
+        double frequency3 = static_cast<double>(count3) / N;
+        double frequency4 = static_cast<double>(count4) / N;
+
+        std::cout << "Frequency above |1|: " << frequency1 << "\n";
+        std::cout << "Frequency above |2|: " << frequency2 << "\n";
+        std::cout << "Frequency above |3|: " << frequency3 << "\n";
+        std::cout << "Frequency above |4|: " << frequency4 << "\n";
+
+        for (int lag : {1, 2, 5, 10, 50, 100}) {
+
+            long double num = 0.0L;
+
+            for (int i = 0; i < N - lag; i++) {
+                num += (numbers[i] - mean)
+                    * (numbers[i + lag] - mean);
+            }
+
+            long double rho = num / sum_sq;
+
+            std::cout << "Lag-" << lag
+                    << " autocorrelation: "
+                    << rho << "\n";
+        
+        }
+        alpha +=0.1;
+        lambda +=0.1;
+
+
+
     }
 
 
