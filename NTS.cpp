@@ -222,7 +222,7 @@ double ziggurat(XorwowState& s, BitPool& h) {
     }
 }
 
-/* computes*/
+/* computes values which can be precomputed for Devroje algorithm sued to generate the tilted stable */
 void initDevroye(Devroye& p, double lambda, double alpha) {
     p.alpha = alpha;
     p.one_minus_alpha = 1.0 - alpha;
@@ -263,6 +263,7 @@ void initDevroye(Devroye& p, double lambda, double alpha) {
     p.gamma_ge_one = p.gamma >= 1.0;
 }
 
+/* computes values which can be precomputed for Qu algorithm sued to generate the tilted stable */
 void initQu(Qu& p, double lambda, double a) {
     p.alpha = a;
     p.lambda = lambda;
@@ -277,12 +278,15 @@ void initQu(Qu& p, double lambda, double a) {
     p.C4 = tgamma(p.y + 1.0) * exp(p.y) / (sqrt(2.0 * pi * a * (1.0 - a) * p.lambda_alpha) * pow(p.y, p.y));
 }
 
-
+/*inline function to generate a unifomr distribution using xorwow
+any uniform(a,b) can be generated as uniform01(s)*(b-a)+a. */
 inline double uniform01(XorwowState& s) {
     constexpr double INV_2_32 = 1.0 / 4294967296.0;
     return (static_cast<double>(xorwow(s)) + 0.5) * INV_2_32;
 }
 
+/* Qu algorithm used to generate the T in the NTS distribution as discussed in the paper RandomVariate Generationfor Exponential and Gamma
+Tilted Stable Distributions Qu 2021. Algorithm is based on 2 dimensional Single Rejection*/
 double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p,XorwowEngine& eng){
     double U;
     double X;
@@ -378,8 +382,9 @@ double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p,XorwowE
 }
 
 
-
-
+/* Devroje algorithm used to generate the T in the NTS distribution as discussed in the paper RANDOM VARIATE GENERATION 
+FOR EXPONENTIALLY AND POLYNOMIALLY TILTED STABLE DISTRIBUTIONS Devroje . Algorithm is based on Double Rejection algorithm.
+This is the main reason Qu is faster*/
 double tilted_tempered_stable_Devroye(XorwowState& s, BitPool& h, const Devroye& p) {
     double U;
     double z;
@@ -466,7 +471,7 @@ double tilted_tempered_stable_Devroye(XorwowState& s, BitPool& h, const Devroye&
     }
 }
 
-
+/*Union of tilted simulation Devroje and ziggurat. T is modified in order to have expected value 0 */
 double NTSDevroye(XorwowState& state, BitPool& pool, const Devroye& p, double beta, double mu, double sigma) {
     double T = tilted_tempered_stable_Devroye(state, pool, p);
     double T_scaled = T * p.inv_meanT;
@@ -475,6 +480,7 @@ double NTSDevroye(XorwowState& state, BitPool& pool, const Devroye& p, double be
     return mu + beta * (T_scaled - 1.0) + sigma * std::sqrt(T_scaled) * Z;
 }
 
+/*Union of tilted simulation Qu and ziggurat. T is modified in order to have expected value 0 */
 double NTSQu(XorwowState& state, BitPool& pool, const Qu& p,XorwowEngine& eng, double beta, double mu, double sigma) {
     double T = tilted_tempered_stable_Qu(state, pool, p,eng);
     double T_scaled = T / (p.alpha * pow(p.lambda, p.alpha - 1.0));
