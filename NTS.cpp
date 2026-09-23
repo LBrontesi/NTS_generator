@@ -120,6 +120,24 @@ uint32_t xorwow(XorwowState& s) {
     return new_state + s.d;
 }
 
+/*struct needed to use the xorwow algorithm inside the gamma distribution, initialized with xorwow state */
+struct XorwowEngine {
+    using result_type = uint32_t;
+
+    XorwowState& state;
+
+    static constexpr result_type min() { 
+        return 0; 
+    }
+    static constexpr result_type max() { 
+        return UINT32_MAX; 
+    }
+
+    result_type operator()() {
+        return xorwow(state);
+    }
+};
+
 
 /*given i need a random sign, this function takes as input a XORWOW generation and keeps 1 bit for the sign
 the other 31 bits are kept to generate signs later*/
@@ -204,7 +222,7 @@ double ziggurat(XorwowState& s, BitPool& h) {
     }
 }
 
-
+/* computes*/
 void initDevroye(Devroye& p, double lambda, double alpha) {
     p.alpha = alpha;
     p.one_minus_alpha = 1.0 - alpha;
@@ -265,19 +283,18 @@ inline double uniform01(XorwowState& s) {
     return (static_cast<double>(xorwow(s)) + 0.5) * INV_2_32;
 }
 
-double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p){
+double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p,XorwowEngine& eng){
     double U;
     double X;
     double V;
     double S;
     double Z;
-    static std::mt19937 gen(std::random_device{}());
     
     if (p.C1 == std::min({p.C1, p.C2, p.C3, p.C4})) {
         std::gamma_distribution<double> gamma(p.x, 1.0);
         for (;;) {
             U = uniform01(s) * pi;
-            X = gamma(gen);
+            X = gamma(eng);
             V = uniform01(s);
             S = X / p.lambda;
 
@@ -292,13 +309,11 @@ double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p){
             if (V <= x1 * x2 * x3 * x4 * x5 / p.C1) break;
         }
 
-    } 
-
-    if (p.C2 == std::min({p.C1, p.C2, p.C3, p.C4})){
+    } else if (p.C2 == std::min({p.C1, p.C2, p.C3, p.C4})){
         std::gamma_distribution<double> gamma(p.y + 1.0, 1.0);
         for (;;) {
             U = uniform01(s) * pi;
-            Z = gamma(gen);
+            Z = gamma(eng);
             V = uniform01(s);
 
             double BU = (pow(sin(p.alpha * U), p.alpha) * pow(sin((1.0 - p.alpha) * U), 1.0 - p.alpha)) / sin(U);
@@ -311,8 +326,7 @@ double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p){
 
             if (V <= x1 * x2 * x3 / p.C2) break;
         }
-    } 
-    if (p.C3 == std::min({p.C1, p.C2, p.C3, p.C4})){
+    } else if (p.C3 == std::min({p.C1, p.C2, p.C3, p.C4})){
         std::gamma_distribution<double> gamma(p.x, 1.0);
         double sigma = 1.0 / sqrt(p.alpha * (1.0 - p.alpha) * p.lambda_alpha);
 
@@ -321,7 +335,7 @@ double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p){
                 U = ziggurat(s, h) * sigma;
             } while (U < 0.0 || U > pi);
 
-            X = gamma(gen);
+            X = gamma(eng);
             V = uniform01(s);
             S = X / p.lambda;
 
@@ -336,8 +350,7 @@ double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p){
 
             if (V <= (x1 * x2 * x3 * x6) / (x4 * x5)) break;
         }
-    } 
-    if (p.C4 == std::min({p.C1, p.C2, p.C3, p.C4})){
+    } else {
         std::gamma_distribution<double> gamma(p.y + 1.0, 1.0);
         double sigma = 1.0 / sqrt(p.alpha * (1.0 - p.alpha) * p.lambda_alpha);
 
@@ -346,7 +359,7 @@ double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p){
                 U = ziggurat(s, h) * sigma;
             } while (U < 0.0 || U > pi);
 
-            Z = gamma(gen);
+            Z = gamma(eng);
             V = uniform01(s);
 
             double BU = (pow(sin(p.alpha * U), p.alpha) * pow(sin((1.0 - p.alpha) * U), 1.0 - p.alpha)) / sin(U);
@@ -462,8 +475,8 @@ double NTSDevroye(XorwowState& state, BitPool& pool, const Devroye& p, double be
     return mu + beta * (T_scaled - 1.0) + sigma * std::sqrt(T_scaled) * Z;
 }
 
-double NTSQu(XorwowState& state, BitPool& pool, const Qu& p, double beta, double mu, double sigma) {
-    double T = tilted_tempered_stable_Qu(state, pool, p);
+double NTSQu(XorwowState& state, BitPool& pool, const Qu& p,XorwowEngine& eng, double beta, double mu, double sigma) {
+    double T = tilted_tempered_stable_Qu(state, pool, p,eng);
     double T_scaled = T / (p.alpha * pow(p.lambda, p.alpha - 1.0));
     double Z = ziggurat(state, pool);
     return mu + beta * (T_scaled - 1.0) + sigma * std::sqrt(T_scaled) * Z;
@@ -475,12 +488,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    const int N = 10000000;
+    const int N = 1000000;
     std::vector<double> numbers(N);
 
     uint64_t seed = std::stoull(argv[1]);
     BitPool h;
     XorwowState g;
+    XorwowEngine gen{g};
     Devroye p;
     Qu q;
 
@@ -500,7 +514,7 @@ int main(int argc, char* argv[]) {
 
     auto start4 = std::chrono::high_resolution_clock::now();
 
-    for (int i = 0; i < N; i++) numbers[i] = NTSQu(g, h, q, 0.5, 0.0, 1.0);
+    for (int i = 0; i < N; i++) numbers[i] = NTSQu(g, h, q,gen, 0.5, 0.0, 1.0);
 
     auto end4 = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> elapsed4 = end4 - start4;
