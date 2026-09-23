@@ -295,7 +295,7 @@ double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p){
     } 
 
     if (p.C2 == std::min({p.C1, p.C2, p.C3, p.C4})){
-        std::gamma_distribution<double> gamma((1-p.alpha)*p.lambda_alpha, 1.0);
+        std::gamma_distribution<double> gamma(p.y + 1.0, 1.0);
         for (;;) {
             U = uniform01(s) * pi;
             Z = gamma(gen);
