@@ -4,6 +4,7 @@
 #include <vector>
 #include <algorithm>
 #include <random>
+#include <chrono>
 
 /* define costants for the ziggurat algorithm with 256 layers
 r is the last right edge, a quantile
@@ -66,11 +67,10 @@ struct Qu {
     double lambda_alpha;
     double x;
     double y;
-    double R;
-    double C1;
-    double C2;
-    double C3;
-    double C4;
+    double logC1, logC2, logC3, logC4;
+    double complement, power, log_lambda, sigma, precision;
+    double log_x_factor, log_z_factor, log_normal_adjustment;
+    double inv_meanT;
     int case_id;
     std::gamma_distribution<double> gamma;
 };
@@ -273,30 +273,34 @@ void initQu(Qu& p, double lambda, double a) {
     p.x = a * p.lambda_alpha;
     p.y = (1.0 - a) * p.lambda_alpha;
 
-    p.R = erf(sqrt(a * (1.0 - a) * p.lambda_alpha * pi * pi / 2.0));
-    p.C1 = (tgamma(p.x) * exp(p.x - 1.0) / pow(p.x, p.lambda_alpha)) * pow(p.alpha / (1.0 - p.alpha) + p.x, p.lambda_alpha * (1.0 - p.alpha) + 1.0);
-    p.C2 = tgamma(p.y + 1.0) * exp(p.y) / pow(p.y, p.y);
-    p.C3 = (tgamma(p.x + 1.0) * exp(p.x - 1.0) * pow(p.x, -p.x)) / (sqrt(2.0 * pi * a * (1.0 - a) * p.lambda_alpha) * pow(1.0 + 1.0 / p.y, -1.0 - p.y));
-    p.C4 = tgamma(p.y + 1.0) * exp(p.y) / (sqrt(2.0 * pi * a * (1.0 - a) * p.lambda_alpha) * pow(p.y, p.y));
+    p.complement = 1.0 - a;
+    p.power = a / p.complement;
+    p.log_lambda = std::log(lambda);
+    p.precision = a * p.complement * p.lambda_alpha;
+    p.sigma = 1.0 / std::sqrt(p.precision);
+    const double log_normal_denominator = 0.5 * std::log(2.0 * pi * p.precision);
+    const double logR = std::log(std::erf(std::sqrt(p.precision * pi * pi / 2.0)));
 
-    double minC = std::min({p.C1, p.C2, p.C3, p.C4});
+    // Compute the logs directly: do not form potentially overflowing C values.
+    p.logC1 = std::lgamma(p.x) + p.x - 1.0 - p.lambda_alpha * std::log(p.x) + (p.y + 1.0) * std::log(p.power + p.x);
+    p.logC2 = std::lgamma(p.y + 1.0) + p.y - p.y * std::log(p.y);
+    p.logC3 = std::lgamma(p.x + 1.0) + p.x - 1.0 - p.x * std::log(p.x) - log_normal_denominator + (p.y + 1.0) * std::log1p(1.0 / p.y);
+    p.logC4 = p.logC2 - log_normal_denominator;
 
-    if (minC == p.C1) {
-        p.case_id = 0;
-        p.gamma = std::gamma_distribution<double>(p.x, 1.0);
-    }
-    else if (minC == p.C2) {
-        p.case_id = 1;
-        p.gamma = std::gamma_distribution<double>(p.y + 1.0, 1.0);
-    }
-    else if (minC == p.C3) {
-        p.case_id = 2;
-        p.gamma = std::gamma_distribution<double>(p.x, 1.0);
-    }
-    else {
-        p.case_id = 3;
-        p.gamma = std::gamma_distribution<double>(p.y + 1.0, 1.0);
-    }
+    // Parameter-only parts of the acceptance ratios.
+    p.log_x_factor = std::log(a) - std::log(p.complement)
+        + p.lambda_alpha + std::lgamma(p.x) + p.power * p.log_lambda;
+    p.log_z_factor = p.lambda_alpha + std::lgamma(p.y + 1.0);
+    p.log_normal_adjustment = logR - log_normal_denominator;
+
+    const double minLogC = std::min({p.logC1, p.logC2, p.logC3, p.logC4});
+    if (minLogC == p.logC1) p.case_id = 0;
+    else if (minLogC == p.logC2) p.case_id = 1;
+    else if (minLogC == p.logC3) p.case_id = 2;
+    else p.case_id = 3;
+    p.gamma = std::gamma_distribution<double>(
+        p.case_id == 0 || p.case_id == 2 ? p.x : p.y + 1.0, 1.0);
+    p.inv_meanT = 1.0 / (a * std::pow(lambda, a - 1.0));
 }
 
 /*inline function to generate a unifomr distribution using xorwow
@@ -308,95 +312,47 @@ inline double uniform01(XorwowState& s) {
 
 /* Qu algorithm used to generate the T in the NTS distribution as discussed in the paper RandomVariate Generationfor Exponential and Gamma
 Tilted Stable Distributions Qu 2021. Algorithm is based on 2 dimensional Single Rejection*/
-double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, Qu& p,XorwowEngine& eng){
-    double U;
-    double X;
-    double V;
-    double S;
-    double Z;
-
-    if (p.case_id == 0) {
-        for (;;) {
+// Only the Qu arithmetic is changed; the proposal generators are retained.
+double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, Qu& p, XorwowEngine& eng) {
+    for (;;) {
+        double U;
+        if (p.case_id < 2) {
             U = uniform01(s) * pi;
-            X = p.gamma(eng);
-            V = uniform01(s);
-            S = X / p.lambda;
-
-            double BU = (pow(sin(p.alpha * U), p.alpha) * pow(sin((1.0 - p.alpha) * U), 1.0 - p.alpha)) / sin(U);
-
-            double x1 = (p.alpha * exp(p.lambda_alpha) * tgamma(p.x)) / (1.0 - p.alpha);
-            double x2 = pow(BU, 1.0 / (1.0 - p.alpha));
-            double x3 = pow(p.lambda, p.alpha / (1.0 - p.alpha));
-            double x4 = pow(X, -p.alpha / (1.0 - p.alpha) - p.x);
-            double x5 = exp(-x2 * x3 * pow(X, -p.alpha / (1.0 - p.alpha)));
-
-            if (V <= x1 * x2 * x3 * x4 * x5 / p.C1) break;
-        }
-
-    } else if (p.case_id == 1){
-
-        for (;;) {
-            U = uniform01(s) * pi;
-            Z = p.gamma(eng);
-            V = uniform01(s);
-
-            double BU = (pow(sin(p.alpha * U), p.alpha) * pow(sin((1.0 - p.alpha) * U), 1.0 - p.alpha)) / sin(U);
-
-            S = pow(BU, 1.0 / p.alpha) * pow(Z, -(1.0 - p.alpha) / p.alpha);
-
-            double x1 = exp(p.lambda_alpha) * tgamma(p.y + 1.0);
-            double x2 = pow(Z, -p.y);
-            double x3 = exp(-p.lambda * S);
-
-            if (V <= x1 * x2 * x3 / p.C2) break;
-        }
-    } else if (p.case_id == 2){
-        double sigma = 1.0 / sqrt(p.alpha * (1.0 - p.alpha) * p.lambda_alpha);
-
-        for (;;) {
+        } else {
             do {
-                U = ziggurat(s, h) * sigma;
-            } while (U < 0.0 || U > pi);
-
-            X = p.gamma(eng);
-            V = uniform01(s);
-            S = X / p.lambda;
-
-            double BU = (pow(sin(p.alpha * U), p.alpha) * pow(sin((1.0 - p.alpha) * U), 1.0 - p.alpha)) / sin(U);
-
-            double x1 = p.R * p.alpha * exp(p.lambda_alpha) * tgamma(p.x);
-            double x2 = pow(p.lambda, p.alpha / (1.0 - p.alpha));
-            double x3 = pow(BU, 1.0 / (1.0 - p.alpha));
-            double x4 = p.C3 * (1.0 - p.alpha) * sqrt(2.0 * pi * p.alpha * (1.0 - p.alpha) * p.lambda_alpha);
-            double x5 = pow(X, p.alpha / (1.0 - p.alpha) + p.x);
-            double x6 = exp(-pow(p.lambda * pow(BU, 1.0 / p.alpha) / X, p.alpha / (1.0 - p.alpha)) + p.alpha * (1.0 - p.alpha) * p.lambda_alpha * U * U / 2.0);
-
-            if (V <= (x1 * x2 * x3 * x6) / (x4 * x5)) break;
-        }
-    } else {
-        double sigma = 1.0 / sqrt(p.alpha * (1.0 - p.alpha) * p.lambda_alpha);
-
-        for (;;) {
-            do {
-                U = abs(ziggurat(s, h)) * sigma;
+                U = std::abs(ziggurat(s, h)) * p.sigma;
             } while (U > pi);
-
-            Z = p.gamma(eng);
-            V = uniform01(s);
-
-            double BU = (pow(sin(p.alpha * U), p.alpha) * pow(sin((1.0 - p.alpha) * U), 1.0 - p.alpha)) / sin(U);
-
-            S = pow(BU, 1.0 / p.alpha) * pow(Z, -(1.0 - p.alpha) / p.alpha);
-
-            double x1 = p.R * exp(p.lambda_alpha) * tgamma(p.y + 1.0);
-            double x2 = p.C4 * sqrt(2.0 * pi * p.alpha * (1.0 - p.alpha) * p.lambda_alpha) * pow(Z, p.y);
-            double x3 = exp(-p.lambda * S + p.alpha * (1.0 - p.alpha) * p.lambda_alpha * U * U / 2.0);
-
-            if (V <= x1 * x3 / x2) break;
         }
-    }
-    return S;
+        const double proposal = p.gamma(eng);
+        const double V = uniform01(s);
+        // Logs require positive arguments. Zero can occur in finite precision.
+        if (!(U > 0.0 && U < pi) || !(proposal > 0.0)) continue;
+        const double logBU = p.alpha * std::log(std::sin(p.alpha * U))
+            + p.complement * std::log(std::sin(p.complement * U))
+            - std::log(std::sin(U));
+        const double logProposal = std::log(proposal);
+        double S, logAcceptance;
 
+        if (p.case_id == 0 || p.case_id == 2) {
+            // X proposal: log(x1*x2*x3*x4*x5/C).
+            S = proposal / p.lambda;
+            const double logx2 = logBU / p.complement;
+            const double logx5 = -std::exp(
+                logx2 + p.power * p.log_lambda - p.power * logProposal);
+            logAcceptance = p.log_x_factor + logx2
+                - (p.power + p.x) * logProposal + logx5
+                - (p.case_id == 0 ? p.logC1 : p.logC3);
+        } else {
+            // Z proposal: compute S from its log, and acceptance directly in logs.
+            S = std::exp((logBU - p.complement * logProposal) / p.alpha);
+            logAcceptance = p.log_z_factor - p.y * logProposal - p.lambda * S
+                - (p.case_id == 1 ? p.logC2 : p.logC4);
+        }
+        if (p.case_id >= 2) {
+            logAcceptance += p.log_normal_adjustment + 0.5 * p.precision * U * U;
+        }
+        if (S > 0.0 && std::isfinite(S) && std::log(V) <= logAcceptance) return S;
+    }
 }
 
 
@@ -501,7 +457,7 @@ double NTSDevroye(XorwowState& state, BitPool& pool, const Devroye& p, double be
 /*Union of tilted simulation Qu and ziggurat. T is modified in order to have expected value 0 */
 double NTSQu(XorwowState& state, BitPool& pool, Qu& p,XorwowEngine& eng, double beta, double mu, double sigma) {
     double T = tilted_tempered_stable_Qu(state, pool, p,eng);
-    double T_scaled = T / (p.alpha * pow(p.lambda, p.alpha - 1.0));
+    double T_scaled = T * p.inv_meanT;
     double Z = ziggurat(state, pool);
     return mu + beta * (T_scaled - 1.0) + sigma * std::sqrt(T_scaled) * Z;
 }
@@ -526,15 +482,6 @@ int main(int argc, char* argv[]) {
     initQu(q, 0.5, 0.5);
     init_xorwow(g, seed);
     compute_wki();
-
-    auto start3 = std::chrono::high_resolution_clock::now();
-
-    for (int i = 0; i < N; i++) numbers[i] = NTSDevroye(g, h, p, 0.5, 0.0, 1.0);
-
-    auto end3 = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double, std::milli> elapsed3 = end3 - start3;
-
-    std::cout << "Devroye -> Number of RVs generated " << N << " in " << elapsed3.count() << " ms\n";
 
     auto start4 = std::chrono::high_resolution_clock::now();
 
