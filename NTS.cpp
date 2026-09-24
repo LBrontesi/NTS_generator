@@ -71,6 +71,8 @@ struct Qu {
     double C2;
     double C3;
     double C4;
+    int case_id;
+    std::gamma_distribution<double> gamma;
 };
 
 /* Function needed to generate a 64 bits unsigned integer used to initialize Xorwow struct
@@ -276,6 +278,25 @@ void initQu(Qu& p, double lambda, double a) {
     p.C2 = tgamma(p.y + 1.0) * exp(p.y) / pow(p.y, p.y);
     p.C3 = (tgamma(p.x + 1.0) * exp(p.x - 1.0) * pow(p.x, -p.x)) / (sqrt(2.0 * pi * a * (1.0 - a) * p.lambda_alpha) * pow(1.0 + 1.0 / p.y, -1.0 - p.y));
     p.C4 = tgamma(p.y + 1.0) * exp(p.y) / (sqrt(2.0 * pi * a * (1.0 - a) * p.lambda_alpha) * pow(p.y, p.y));
+
+    double minC = std::min({p.C1, p.C2, p.C3, p.C4});
+
+    if (minC == p.C1) {
+        p.case_id = 0;
+        p.gamma = std::gamma_distribution<double>(p.x, 1.0);
+    }
+    else if (minC == p.C2) {
+        p.case_id = 1;
+        p.gamma = std::gamma_distribution<double>(p.y + 1.0, 1.0);
+    }
+    else if (minC == p.C3) {
+        p.case_id = 2;
+        p.gamma = std::gamma_distribution<double>(p.x, 1.0);
+    }
+    else {
+        p.case_id = 3;
+        p.gamma = std::gamma_distribution<double>(p.y + 1.0, 1.0);
+    }
 }
 
 /*inline function to generate a unifomr distribution using xorwow
@@ -287,18 +308,17 @@ inline double uniform01(XorwowState& s) {
 
 /* Qu algorithm used to generate the T in the NTS distribution as discussed in the paper RandomVariate Generationfor Exponential and Gamma
 Tilted Stable Distributions Qu 2021. Algorithm is based on 2 dimensional Single Rejection*/
-double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p,XorwowEngine& eng){
+double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, Qu& p,XorwowEngine& eng){
     double U;
     double X;
     double V;
     double S;
     double Z;
-    
-    if (p.C1 == std::min({p.C1, p.C2, p.C3, p.C4})) {
-        std::gamma_distribution<double> gamma(p.x, 1.0);
+
+    if (p.case_id == 0) {
         for (;;) {
             U = uniform01(s) * pi;
-            X = gamma(eng);
+            X = p.gamma(eng);
             V = uniform01(s);
             S = X / p.lambda;
 
@@ -313,11 +333,11 @@ double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p,XorwowE
             if (V <= x1 * x2 * x3 * x4 * x5 / p.C1) break;
         }
 
-    } else if (p.C2 == std::min({p.C1, p.C2, p.C3, p.C4})){
-        std::gamma_distribution<double> gamma(p.y + 1.0, 1.0);
+    } else if (p.case_id == 1){
+
         for (;;) {
             U = uniform01(s) * pi;
-            Z = gamma(eng);
+            Z = p.gamma(eng);
             V = uniform01(s);
 
             double BU = (pow(sin(p.alpha * U), p.alpha) * pow(sin((1.0 - p.alpha) * U), 1.0 - p.alpha)) / sin(U);
@@ -330,8 +350,7 @@ double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p,XorwowE
 
             if (V <= x1 * x2 * x3 / p.C2) break;
         }
-    } else if (p.C3 == std::min({p.C1, p.C2, p.C3, p.C4})){
-        std::gamma_distribution<double> gamma(p.x, 1.0);
+    } else if (p.case_id == 2){
         double sigma = 1.0 / sqrt(p.alpha * (1.0 - p.alpha) * p.lambda_alpha);
 
         for (;;) {
@@ -339,7 +358,7 @@ double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p,XorwowE
                 U = ziggurat(s, h) * sigma;
             } while (U < 0.0 || U > pi);
 
-            X = gamma(eng);
+            X = p.gamma(eng);
             V = uniform01(s);
             S = X / p.lambda;
 
@@ -355,15 +374,14 @@ double tilted_tempered_stable_Qu(XorwowState& s, BitPool& h, const Qu& p,XorwowE
             if (V <= (x1 * x2 * x3 * x6) / (x4 * x5)) break;
         }
     } else {
-        std::gamma_distribution<double> gamma(p.y + 1.0, 1.0);
         double sigma = 1.0 / sqrt(p.alpha * (1.0 - p.alpha) * p.lambda_alpha);
 
         for (;;) {
             do {
-                U = ziggurat(s, h) * sigma;
-            } while (U < 0.0 || U > pi);
+                U = abs(ziggurat(s, h)) * sigma;
+            } while (U > pi);
 
-            Z = gamma(eng);
+            Z = p.gamma(eng);
             V = uniform01(s);
 
             double BU = (pow(sin(p.alpha * U), p.alpha) * pow(sin((1.0 - p.alpha) * U), 1.0 - p.alpha)) / sin(U);
@@ -481,7 +499,7 @@ double NTSDevroye(XorwowState& state, BitPool& pool, const Devroye& p, double be
 }
 
 /*Union of tilted simulation Qu and ziggurat. T is modified in order to have expected value 0 */
-double NTSQu(XorwowState& state, BitPool& pool, const Qu& p,XorwowEngine& eng, double beta, double mu, double sigma) {
+double NTSQu(XorwowState& state, BitPool& pool, Qu& p,XorwowEngine& eng, double beta, double mu, double sigma) {
     double T = tilted_tempered_stable_Qu(state, pool, p,eng);
     double T_scaled = T / (p.alpha * pow(p.lambda, p.alpha - 1.0));
     double Z = ziggurat(state, pool);
